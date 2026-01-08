@@ -21,10 +21,10 @@ public class F4Client extends JFrame {
     private Color myColor = Color.GRAY, oppColor = Color.GRAY;
     private String myName, oppName = "???";
 
-    private Socket socket;
-    private BufferedReader in;
-    private PrintWriter out;
-    private String serverIp = "localhost:4444";
+    private DatagramSocket socket;
+    private InetAddress serverAddress;
+    private int serverPort = 4444;
+    private String serverIpStr = "localhost";
 
     private volatile boolean isRunning = false;
     private volatile boolean expectingDisconnect = false;
@@ -44,7 +44,7 @@ public class F4Client extends JFrame {
     }
 
     public F4Client(String name) {
-        super("Forza 4 Client - " + name);
+        super("Forza 4 Client UDP - " + name);
         this.myName = name;
         setupGUI();
         SwingUtilities.invokeLater(this::showMenu);
@@ -147,7 +147,7 @@ public class F4Client extends JFrame {
 
     private void showMenu() {
         fullReset();
-        String[] opts = {"Online", "Offline (vs CPU)"};
+        String[] opts = {"Online (UDP)", "Offline (vs CPU)"};
         int ch = JOptionPane.showOptionDialog(this, "Scegli modalità", "Menu",
                 JOptionPane.DEFAULT_OPTION, JOptionPane.QUESTION_MESSAGE, null, opts, opts[0]);
 
@@ -187,54 +187,73 @@ public class F4Client extends JFrame {
     }
 
     private void startOnline() {
-        String res = JOptionPane.showInputDialog(this, "Indirizzo Server:", serverIp);
+        String res = JOptionPane.showInputDialog(this, "Indirizzo Server (es: localhost):", serverIpStr);
         if(res == null) { showMenu(); return; }
-        serverIp = res;
+        
+        // Separa IP e porta se specificati (es: localhost:4444)
+        if(res.contains(":")) {
+            String[] parts = res.split(":");
+            serverIpStr = parts[0];
+            serverPort = Integer.parseInt(parts[1]);
+        } else {
+            serverIpStr = res;
+            serverPort = 4444;
+        }
 
-        lblStatus.setText("Connessione...");
+        lblStatus.setText("Connessione UDP...");
         isRunning = true;
         expectingDisconnect = false;
         new Thread(this::networkLoop).start();
     }
 
+    private void sendPacket(String msg) throws IOException {
+        byte[] buffer = msg.getBytes();
+        DatagramPacket packet = new DatagramPacket(buffer, buffer.length, serverAddress, serverPort);
+        socket.send(packet);
+    }
+
     private void networkLoop() {
-        while(isRunning) {
-            try {
-                socket = new Socket();
-                socket.connect(new InetSocketAddress(serverIp.split(":")[0], 4444), 3000);
+        try {
+            socket = new DatagramSocket();
+            serverAddress = InetAddress.getByName(serverIpStr);
+            
+            // Handshake iniziale: invio il mio nome
+            sendPacket(myName);
+            
+            SwingUtilities.invokeLater(() -> lblStatus.setText("Pacchetto inviato! Attesa risposta..."));
 
-                in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-                out = new PrintWriter(socket.getOutputStream(), true);
+            byte[] buffer = new byte[1024];
+            while(isRunning) {
+                DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+                socket.receive(packet); // Bloccante
 
-                out.println(myName);
-                SwingUtilities.invokeLater(() -> lblStatus.setText("Connesso! Attesa configurazione..."));
-
-                String msg;
-                while ((msg = in.readLine()) != null) {
-                    if (msg.startsWith("WIN") || msg.startsWith("DRAW") || msg.startsWith("EXIT_OPPONENT_LEFT")) {
-                        expectingDisconnect = true;
-                    }
-                    processMessage(msg);
+                String msg = new String(packet.getData(), 0, packet.getLength());
+                
+                if (msg.startsWith("WIN") || msg.startsWith("DRAW") || msg.startsWith("EXIT_OPPONENT_LEFT")) {
+                    expectingDisconnect = true;
                 }
-                throw new IOException("Server chiuso");
-
-            } catch (IOException e) {
-                if (expectingDisconnect) {
-                    isRunning = false;
-                    return;
-                }
-                try { socket.close(); } catch(Exception ex){}
-                if(!gameStarted) {
-                    try { Thread.sleep(1000); } catch(Exception ex){}
-                } else {
-                    isRunning = false;
-                    SwingUtilities.invokeLater(() -> {
-                        JOptionPane.showMessageDialog(this, "Disconnessione Server!");
-                        showMenu();
-                    });
-                    return;
-                }
+                processMessage(msg);
             }
+
+        } catch (IOException e) {
+            if (expectingDisconnect) {
+                isRunning = false;
+                return;
+            }
+            if(!gameStarted) {
+                // Timeout o errore iniziale
+                SwingUtilities.invokeLater(() -> lblStatus.setText("Errore connessione UDP"));
+                try { Thread.sleep(2000); } catch(Exception ex){}
+                SwingUtilities.invokeLater(this::showMenu);
+            } else {
+                isRunning = false;
+                SwingUtilities.invokeLater(() -> {
+                    JOptionPane.showMessageDialog(this, "Errore rete: " + e.getMessage());
+                    showMenu();
+                });
+            }
+        } finally {
+            if(socket != null && !socket.isClosed()) socket.close();
         }
     }
 
@@ -300,7 +319,7 @@ public class F4Client extends JFrame {
                         for(int i=1; i<p.length; i++) winner += p[i] + " ";
                         txt = "Vittoria: " + winner.trim();
                     } else if (cmd.equals("EXIT_OPPONENT_LEFT")) {
-                        txt = "Avversario disconnesso.";
+                        txt = "Avversario disconnesso/uscito.";
                     }
                     JOptionPane.showMessageDialog(this, txt);
                     showMenu();
@@ -339,9 +358,13 @@ public class F4Client extends JFrame {
         if (isOffline) {
             playOffline(col);
         } else {
-            out.println("MOVE " + col);
-            isMyTurn = false;
-            lblTurn.setText("Attendi...");
+            try {
+                sendPacket("MOVE " + col);
+                isMyTurn = false;
+                lblTurn.setText("Attendi...");
+            } catch(IOException e) {
+                e.printStackTrace();
+            }
         }
     }
 
@@ -389,7 +412,7 @@ public class F4Client extends JFrame {
         dotCount = (dotCount + 1) % 4;
         String dots = ".".repeat(dotCount);
         if (isRunning && !gameStarted) {
-            if(socket == null || socket.isClosed()) lblStatus.setText("Cerco Server" + dots);
+            if(socket == null || socket.isClosed()) lblStatus.setText("Setup UDP" + dots);
             else lblStatus.setText("Attesa avversario" + dots);
 
             if(socket != null && !socket.isClosed()) lblOppName.setText("Scanning" + dots);

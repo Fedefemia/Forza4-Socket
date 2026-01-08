@@ -17,7 +17,7 @@ public class F4Server extends JFrame {
     private int rows, cols;
     private char sym1, sym2;
 
-    private ServerSocket serverSocket;
+    private DatagramSocket serverSocket;
     private Player p1, p2;
     private char[][] board;
 
@@ -43,13 +43,14 @@ public class F4Server extends JFrame {
     }
 
     public F4Server(int rows, int cols, char s1, char s2) {
-        super("F4 Server Monitor");
+        super("F4 Server Monitor UDP");
         this.rows = rows;
         this.cols = cols;
         this.sym1 = s1;
         this.sym2 = s2;
 
         setupGUI();
+        // Avvio thread principale del server
         new Thread(this::serverLoop).start();
     }
 
@@ -62,7 +63,7 @@ public class F4Server extends JFrame {
         header.setBorder(new EmptyBorder(10,10,10,10));
         header.setBackground(new Color(230,230,230));
 
-        lblStatus = new JLabel("Server Attivo - Porta " + port);
+        lblStatus = new JLabel("Server UDP Attivo - Porta " + port);
         lblStatus.setFont(new Font("Arial", Font.BOLD, 16));
         lblStatus.setHorizontalAlignment(SwingConstants.CENTER);
         header.add(lblStatus);
@@ -105,8 +106,8 @@ public class F4Server extends JFrame {
 
     private void serverLoop() {
         try {
-            serverSocket = new ServerSocket(port);
-            log("Server avviato.");
+            serverSocket = new DatagramSocket(port);
+            log("Server UDP avviato sulla porta " + port);
 
             while (true) {
                 p1 = null; p2 = null;
@@ -119,38 +120,57 @@ public class F4Server extends JFrame {
                 });
                 log("--- In attesa di nuova partita ---");
 
-                p1 = acceptPlayer(sym1);
-                SwingUtilities.invokeLater(() -> lblP1.setText("P1: " + p1.name));
+                // Logica sincrona come richiesto: Attendo P1, poi P2
+                p1 = acceptPlayer(sym1, null);
+                SwingUtilities.invokeLater(() -> lblP1.setText("P1: " + p1.name + " (" + p1.address.getHostAddress() + ":" + p1.port + ")"));
                 p1.send("CONFIG " + rows + " " + cols + " " + sym1 + " RED");
 
-                p2 = acceptPlayer(sym2);
-                SwingUtilities.invokeLater(() -> lblP2.setText("P2: " + p2.name));
+                p2 = acceptPlayer(sym2, p1); // Passo p1 per assicurarmi che p2 sia diverso
+                SwingUtilities.invokeLater(() -> lblP2.setText("P2: " + p2.name + " (" + p2.address.getHostAddress() + ":" + p2.port + ")"));
                 p2.send("CONFIG " + rows + " " + cols + " " + sym2 + " YELLOW");
 
                 if (p1.name.equals(p2.name)) { p1.name += "1"; p2.name += "2"; }
 
-                log("Partita: " + p1.name + " vs " + p2.name);
+                log("Start: " + p1.name + " vs " + p2.name);
                 p1.send("START " + p2.name + " " + sym2);
                 p2.send("START " + p1.name + " " + sym1);
 
                 playMatch();
 
-                log("Chiusura connessioni...");
-                try { Thread.sleep(200); } catch(InterruptedException e) {}
-                if (p1 != null) p1.close();
-                if (p2 != null) p2.close();
+                log("Fine partita. Reset.");
+                try { Thread.sleep(1000); } catch(InterruptedException e) {}
             }
 
         } catch (IOException e) {
-            log("Errore Server: " + e.getMessage());
+            log("Errore Server Critico: " + e.getMessage());
+        } finally {
+             if(serverSocket != null) serverSocket.close();
         }
     }
 
-    private Player acceptPlayer(char symbol) throws IOException {
-        Socket s = serverSocket.accept();
-        Player p = new Player(s, symbol);
-        log("Connesso: " + p.name);
-        return p;
+    // UDP non ha "accept", quindi aspettiamo un pacchetto
+    private Player acceptPlayer(char symbol, Player existingPlayer) throws IOException {
+        byte[] buf = new byte[1024];
+        while(true) {
+            DatagramPacket packet = new DatagramPacket(buf, buf.length);
+            serverSocket.receive(packet);
+            
+            InetAddress addr = packet.getAddress();
+            int p = packet.getPort();
+            
+            // Se esiste già un giocatore, controlliamo che il nuovo pacchetto non venga dallo stesso (IP+Porta)
+            if (existingPlayer != null) {
+                if (existingPlayer.address.equals(addr) && existingPlayer.port == p) {
+                    // È lo stesso giocatore che rimanda dati, ignoriamo o aggiorniamo, ma qui continuiamo ad attendere il secondo
+                    continue; 
+                }
+            }
+
+            String n = new String(packet.getData(), 0, packet.getLength()).trim();
+            Player player = new Player(addr, p, n, symbol);
+            log("Rilevato giocatore: " + player.name);
+            return player;
+        }
     }
 
     private void playMatch() {
@@ -163,16 +183,17 @@ public class F4Server extends JFrame {
                 current.send("YOUR_TURN");
                 other.send("WAIT_TURN");
 
-                String line = current.in.readLine();
-                if (line == null) throw new IOException("Client disconnected");
-
+                // Attesa mossa via UDP
+                // Dobbiamo assicurarci che il pacchetto arrivi dal giocatore corrente
+                String line = receiveMoveFrom(current);
+                
                 if (line.startsWith("MOVE")) {
                     int col = Integer.parseInt(line.split(" ")[1]);
                     if (isValidMove(col)) {
                         int row = dropToken(col, current.symbol);
 
                         SwingUtilities.invokeLater(boardPanel::repaint);
-                        log(current.name + " -> " + col);
+                        log(current.name + " -> col " + col);
 
                         broadcast("MOVED " + row + " " + col + " " + current.symbol);
 
@@ -185,6 +206,7 @@ public class F4Server extends JFrame {
                             log("Pareggio");
                             gameRunning = false;
                         } else {
+                            // Scambio turno
                             Player temp = current;
                             current = other;
                             other = temp;
@@ -192,10 +214,27 @@ public class F4Server extends JFrame {
                     }
                 }
             } catch (Exception e) {
-                log("Disconnessione in gioco: " + e.getMessage());
+                log("Errore o Timeout in gioco: " + e.getMessage());
+                // In UDP non rileviamo disconnessioni passive facilmente, 
+                // ma se send() fallisce o logica salta, chiudiamo.
                 broadcast("EXIT_OPPONENT_LEFT");
                 gameRunning = false;
             }
+        }
+    }
+    
+    // Metodo helper per ricevere dati strettamente da un giocatore specifico
+    private String receiveMoveFrom(Player p) throws IOException {
+        byte[] buf = new byte[1024];
+        while(true) {
+            DatagramPacket packet = new DatagramPacket(buf, buf.length);
+            serverSocket.receive(packet);
+            
+            // Verifica mittente
+            if (packet.getAddress().equals(p.address) && packet.getPort() == p.port) {
+                return new String(packet.getData(), 0, packet.getLength()).trim();
+            }
+            // Se arriva un pacchetto dall'altro giocatore fuori turno, lo ignoriamo (o logghiamo)
         }
     }
 
@@ -284,21 +323,28 @@ public class F4Server extends JFrame {
         }
     }
 
+    // Classe Player modificata per UDP
     class Player {
-        Socket s;
-        PrintWriter out;
-        BufferedReader in;
+        InetAddress address;
+        int port;
         String name;
         char symbol;
-        Player(Socket s, char sym) throws IOException {
-            this.s = s;
+
+        Player(InetAddress address, int port, String name, char sym) {
+            this.address = address;
+            this.port = port;
+            this.name = (name!=null && !name.isEmpty()) ? name : "Unknown";
             this.symbol = sym;
-            out = new PrintWriter(s.getOutputStream(), true);
-            in = new BufferedReader(new InputStreamReader(s.getInputStream()));
-            String n = in.readLine();
-            name = (n!=null && !n.isEmpty()) ? n : "Unknown";
         }
-        void send(String m) { out.println(m); }
-        void close() { try { s.close(); } catch(Exception e){} }
+
+        void send(String msg) {
+            try {
+                byte[] data = msg.getBytes();
+                DatagramPacket packet = new DatagramPacket(data, data.length, address, port);
+                serverSocket.send(packet);
+            } catch (IOException e) {
+                log("Errore invio a " + name + ": " + e.getMessage());
+            }
+        }
     }
 }
