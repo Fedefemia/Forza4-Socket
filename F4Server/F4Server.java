@@ -7,7 +7,7 @@ import java.net.*;
 import java.util.Arrays;
 import javax.swing.Timer;
 
-public class F4Server extends JFrame {
+public class F4Server extends JFrame{
     private JLabel lblStatus;
     private JLabel lblP1, lblP2;
     private JPanel boardPanel;
@@ -24,7 +24,7 @@ public class F4Server extends JFrame {
     private Timer scanTimer;
     private int dotCount = 0;
 
-    public static void main(String[] args) {
+    public static void main (String[] args) {
         if (args.length < 4) {
             JOptionPane.showMessageDialog(null, "Parametri mancanti!\nUso: java F4Server <righe> <colonne> <sim1> <sim2>");
             System.exit(1);
@@ -109,37 +109,53 @@ public class F4Server extends JFrame {
             log("Server avviato.");
 
             while (true) {
-                p1 = null; p2 = null;
-                board = new char[rows][cols];
-                for(char[] r : board) Arrays.fill(r, ' ');
-                SwingUtilities.invokeLater(() -> {
-                    boardPanel.repaint();
-                    lblP1.setText("Player 1: Scanning...");
-                    lblP2.setText("Player 2: Scanning...");
-                });
-                log("--- In attesa di nuova partita ---");
+    p1 = null;
+    p2 = null;
+    board = new char[rows][cols];
+    for(char[] r : board) Arrays.fill(r, ' ');
 
-                p1 = acceptPlayer(sym1);
-                SwingUtilities.invokeLater(() -> lblP1.setText("P1: " + p1.name));
-                p1.send("CONFIG " + rows + " " + cols + " " + sym1 + " RED");
+    SwingUtilities.invokeLater(() -> {
+        boardPanel.repaint();
+        lblP1.setText("Player 1: In attesa...");
+        lblP2.setText("Player 2: In attesa...");
+    });
+    log("--- In attesa di nuova partita ---");
 
-                p2 = acceptPlayer(sym2);
-                SwingUtilities.invokeLater(() -> lblP2.setText("P2: " + p2.name));
-                p2.send("CONFIG " + rows + " " + cols + " " + sym2 + " YELLOW");
+    try {
+        // Connessione Giocatore 1
+        p1 = acceptPlayer(sym1);
+        
+        SwingUtilities.invokeLater(() -> lblP1.setText("P1: " + p1.name));
+        p1.send("CONFIG " + rows + " " + cols + " " + sym1 + " RED");
 
-                if (p1.name.equals(p2.name)) { p1.name += "1"; p2.name += "2"; }
+        // Connessione Giocatore 2
+        p2 = acceptPlayer(sym2);
+        
+        SwingUtilities.invokeLater(() -> lblP2.setText("P2: " + p2.name));
+        p2.send("CONFIG " + rows + " " + cols + " " + sym2 + " YELLOW");
 
-                log("Partita: " + p1.name + " vs " + p2.name);
-                p1.send("START " + p2.name + " " + sym2);
-                p2.send("START " + p1.name + " " + sym1);
+        // Risoluzione conflitto nomi
+        if (p1.name.equals(p2.name)) { 
+            p1.name += "1"; 
+            p2.name += "2"; 
+        }
 
-                playMatch();
+        log("Partita: " + p1.name + " vs " + p2.name);
+        p1.send("START " + p2.name + " " + sym2);
+        p2.send("START " + p1.name + " " + sym1);
 
-                log("Chiusura connessioni...");
-                try { Thread.sleep(200); } catch(InterruptedException e) {}
-                if (p1 != null) p1.close();
-                if (p2 != null) p2.close();
-            }
+        // Avvio logica di gioco
+        playMatch();
+
+    } catch (IOException e) {
+        log("Errore connessione: " + e.getMessage());
+    }
+
+    log("Chiusura connessioni...");
+    try { Thread.sleep(200); } catch(InterruptedException e) {}
+    if (p1 != null) p1.close();
+    if (p2 != null) p2.close();
+}
 
         } catch (IOException e) {
             log("Errore Server: " + e.getMessage());
