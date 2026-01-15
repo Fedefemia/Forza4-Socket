@@ -323,7 +323,6 @@ public class F4Server extends JFrame {
         }
     }
 
-    // Classe Player modificata per UDP
     class Player {
         InetAddress address;
         int port;
